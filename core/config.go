@@ -1,7 +1,9 @@
 package core
 
-import "log"
+import "github.com/kowala-tech/kcoin/client/log"
+
+var DefaultConfig = Config{}
 
 type Config struct {
-	Log log.Logger
+	Logger log.Logger
 }

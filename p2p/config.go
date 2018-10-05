@@ -6,6 +6,10 @@ import (
 	addr "github.com/multiformats/go-multiaddr"
 )
 
+var DefaultConfig = Config{
+	MaxPeers: 15,
+}
+
 type Config struct {
 	Identity *crypto.PrivKey
 

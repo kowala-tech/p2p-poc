@@ -2,13 +2,16 @@ package node
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
+	"syscall"
 
 	"github.com/kowala-tech/kcoin/client/event"
 	"github.com/kowala-tech/kcoin/client/log"
 	"github.com/kowala-tech/p2p-poc/p2p"
+	"github.com/prometheus/prometheus/util/flock"
 )
 
 // Node represents a block chain node.
@@ -16,7 +19,7 @@ type Node struct {
 	cfg Config
 
 	serverCfg p2p.Config
-	server *p2p.Server
+	overlay   *p2p.Overlay
 
 	lock         sync.RWMutex
 	serviceFuncs []ServiceConstructor     // Service constructors (in dependency order)
@@ -24,7 +27,11 @@ type Node struct {
 
 	globalEvents *event.TypeMux
 
+	instanceDirLock flock.Releaser // prevents concurrent use of instance directory
+
 	log log.Logger
+
+	stop chan struct{} // Channel to wait for termination notifications
 }
 
 // New create a new Kowala node, ready for service registration.
@@ -34,11 +41,10 @@ func New(ctx context.Context, cfg Config) *Node {
 	}
 
 	return &Node{
-		server:       p2p.NewServer(cfg.P2P),
 		cfg:          cfg,
 		serviceFuncs: []ServiceConstructor{},
 		globalEvents: new(event.TypeMux),
-		log:       cfg.Logger,
+		log:          cfg.Logger,
 	}
 }
 
@@ -48,7 +54,7 @@ func (n *Node) Register(constructor ServiceConstructor) error {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 
-	if n.server != nil {
+	if n.overlay != nil {
 		return ErrNodeRunning
 	}
 	n.serviceFuncs = append(n.serviceFuncs, constructor)
@@ -61,7 +67,7 @@ func (n *Node) Start() error {
 	defer n.lock.Unlock()
 
 	// Short circuit if the node's already running
-	if n.server != nil {
+	if n.overlay != nil {
 		return ErrNodeRunning
 	}
 	if err := n.openDataDir(); err != nil {
@@ -74,11 +80,15 @@ func (n *Node) Start() error {
 	//n.serverCfg.PrivateKey = n.config.NodeKey()
 	n.serverCfg.Name = n.cfg.NodeName()
 	n.serverCfg.Log = n.log
-	
+
 	if n.serverCfg.NodeDatabaseDir == "" {
 		n.serverCfg.NodeDatabaseDir = n.cfg.NodeDB()
 	}
-	srv := p2p.NewServer(n.serverCfg)
+	overlay, err := p2p.NewOverlay(n.serverCfg)
+	if err != nil {
+		return err
+	}
+
 	n.log.Info("Starting peer-to-peer node", "instance", n.serverCfg.Name)
 
 	// Otherwise copy and specialize the P2P configuration
@@ -86,9 +96,9 @@ func (n *Node) Start() error {
 	for _, constructor := range n.serviceFuncs {
 		// Create a new context for the particular service
 		ctx := &ServiceContext{
-			cfg:         &n.cfg,
-			services:       make(map[reflect.Type]Service),
-			GlobalEvents:       n.globalEvents,
+			cfg:          &n.cfg,
+			services:     make(map[reflect.Type]Service),
+			GlobalEvents: n.globalEvents,
 		}
 		for kind, s := range services { // copy needed for threaded access
 			ctx.services[kind] = s
@@ -104,33 +114,33 @@ func (n *Node) Start() error {
 		}
 		services[kind] = service
 	}
-	// Gather the protocols and start the freshly assembled P2P server
-	for _, service := range services {
-		srv.Protocols = append(srv.Protocols, service.Protocols()...)
-	}
-	if err := srv.Start(); err != nil {
-		return convertFileLockError(err)
-	}
+
+	/*
+		if err := srv.Start(); err != nil {
+			return convertFileLockError(err)
+		}
+	*/
 	// Start each of the services
 	started := []reflect.Type{}
 	for kind, service := range services {
 		// Start the next service, stopping all previous upon failure
-		if err := service.Start(srv); err != nil {
+		if err := service.Start(overlay); err != nil {
 			for _, kind := range started {
 				services[kind].Stop()
 			}
-			srv.Stop()
+
+			// @TODO
+			//srv.Stop()
 
 			return err
 		}
 		// Mark the service started for potential cleanup
 		started = append(started, kind)
 	}
-	
+
 	// Finish initializing the startup
 	n.services = services
-	n.server = running
-	n.stop = make(chan struct{})
+	n.overlay = overlay
 
 	return nil
 }
@@ -140,7 +150,7 @@ func (n *Node) openDataDir() error {
 		return nil // ephemeral
 	}
 
-	instdir := filepath.Join(n.cfg.DataDir, n.config.name())
+	instdir := filepath.Join(n.cfg.DataDir, n.cfg.name())
 	if err := os.MkdirAll(instdir, 0700); err != nil {
 		return err
 	}
@@ -161,15 +171,15 @@ func (n *Node) Stop() error {
 	defer n.lock.Unlock()
 
 	// Short circuit if the node's not running
-	if n.server == nil {
+	if n.overlay == nil {
 		return ErrNodeStopped
 	}
 
 	// Terminate the API, services and the p2p server.
-	n.stopWS()
-	n.stopHTTP()
-	n.stopIPC()
-	n.rpcAPIs = nil
+	//n.stopWS()
+	//n.stopHTTP()
+	//n.stopIPC()
+	//n.rpcAPIs = nil
 	failure := &StopError{
 		Services: make(map[reflect.Type]error),
 	}
@@ -178,9 +188,9 @@ func (n *Node) Stop() error {
 			failure.Services[kind] = err
 		}
 	}
-	n.server.Stop()
+	//n.server.Stop()
 	n.services = nil
-	n.server = nil
+	n.overlay = nil
 
 	// Release instance directory lock.
 	if n.instanceDirLock != nil {
@@ -194,16 +204,39 @@ func (n *Node) Stop() error {
 	close(n.stop)
 
 	// Remove the keystore if it was created ephemerally.
-	var keystoreErr error
-	if n.ephemeralKeystore != "" {
-		keystoreErr = os.RemoveAll(n.ephemeralKeystore)
-	}
+	//var keystoreErr error
+	//if n.ephemeralKeystore != "" {
+	//	keystoreErr = os.RemoveAll(n.ephemeralKeystore)
+	//}
 
 	if len(failure.Services) > 0 {
 		return failure
 	}
-	if keystoreErr != nil {
-		return keystoreErr
-	}
+	/*
+		if keystoreErr != nil {
+			return keystoreErr
+		}
+	*/
 	return nil
+}
+
+func convertFileLockError(err error) error {
+	if errno, ok := err.(syscall.Errno); ok && datadirInUseErrnos[uint(errno)] {
+		return ErrDatadirUsed
+	}
+	return err
+}
+
+// Wait blocks the thread until the node is stopped. If the node is not running
+// at the time of invocation, the method immediately returns.
+func (n *Node) Wait() {
+	n.lock.RLock()
+	if n.overlay == nil {
+		n.lock.RUnlock()
+		return
+	}
+	stop := n.stop
+	n.lock.RUnlock()
+
+	<-stop
 }

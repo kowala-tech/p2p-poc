@@ -17,17 +17,14 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
-	dstore "github.com/ipfs/go-datastore"
-	"github.com/ipfs/go-datastore/sync"
-	"github.com/kowala-tech/kcoin/client/log"
-	libp2p "github.com/libp2p/go-libp2p"
-	crypto "github.com/libp2p/go-libp2p-crypto"
-	dht "github.com/libp2p/go-libp2p-kad-dht"
+	kcoinlog "github.com/kowala-tech/kcoin/client/log"
+	"github.com/kowala-tech/p2p-poc/core"
+	"github.com/kowala-tech/p2p-poc/node"
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -66,7 +63,7 @@ func init() {
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.node.yaml)")
 	rootCmd.PersistentFlags().StringVar(&listenAddr, "addr", "/ip4/127.0.0.1/tcp/33445", "listen address")
-	rootCmd.PersistentFlags().IntVar(&verbosity, "verbosity", int(log.LvlInfo), "log verbosity (0-9)")
+	rootCmd.PersistentFlags().IntVar(&verbosity, "verbosity", int(kcoinlog.LvlInfo), "log verbosity (0-9)")
 	rootCmd.PersistentFlags().StringVar(&vmodule, "vmodule", "", "log verbosity pattern")
 }
 
@@ -97,36 +94,64 @@ func initConfig() {
 }
 
 func run(cmd *cobra.Command, args []string) error {
-	glogger := log.NewGlogHandler(log.StreamHandler(os.Stdout, log.TerminalFormat(false)))
-	glogger.Verbosity(log.Lvl(verbosity))
-	glogger.Vmodule(vmodule)
-	log.Root().SetHandler(glogger)
-
-	log.Info("Initialising node")
-
-	ctx := context.Background()
-
-	privKey, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, rand.New(rand.NewSource(0)))
-	if err != nil {
-		return err
-	}
-
-	host, err := libp2p.New(ctx, libp2p.Identity(privKey), libp2p.ListenAddrStrings(listenAddr))
-	if err != nil {
-		return err
-	}
-
-	dhtClient := dht.NewDHT(ctx, host, sync.MutexWrap(dstore.NewMapDatastore()))
-	if err := dhtClient.Bootstrap(ctx); err != nil {
-		return err
-	}
-
-	signals := make(chan os.Signal)
-	signal.Notify(signals, syscall.SIGTERM)
-
-	select {
-	case <-signals:
-	}
-
+	node := makeFullNode()
+	startNode(node)
+	node.Wait()
 	return nil
+}
+
+func makeFullNode() *node.Node {
+	node, cfg := makeConfigNode()
+	registerCoreService(node, cfg.Core)
+	return node
+}
+
+func registerCoreService(stack *node.Node, cfg core.Config) {
+	if err := stack.Register(func(ctx *node.ServiceContext) (node.Service, error) {
+		fullNode, err := core.New(ctx, cfg)
+		return fullNode, err
+	}); err != nil {
+		log.Fatal("Failed to register the core service")
+	}
+}
+
+type GlobalConfig struct {
+	Core core.Config
+	Node node.Config
+}
+
+func makeConfigNode() (*node.Node, GlobalConfig) {
+	cfg := GlobalConfig{
+		Node: node.DefaultConfig,
+		Core: core.DefaultConfig,
+	}
+
+	node := node.New(context.Background(), cfg.Node)
+
+	return node, cfg
+}
+
+// startNode boots up the system node and all registered protocols, after which
+// it unlocks any requested accounts, and starts the RPC/IPC interfaces and the
+// validator.
+func startNode(stack *node.Node) {
+	if err := stack.Start(); err != nil {
+		kcoinlog.Crit("Error starting protocol stack: %v", err)
+	}
+	go func() {
+		sigc := make(chan os.Signal, 1)
+		signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(sigc)
+		<-sigc
+		kcoinlog.Info("Got interrupt, shutting down...")
+		go stack.Stop()
+		for i := 10; i > 0; i-- {
+			<-sigc
+			if i > 1 {
+				kcoinlog.Warn("Already shutting down, interrupt more to panic.", "times", i-1)
+			}
+		}
+		//debug.Exit() // ensure trace and CPU profile data is flushed.
+		//debug.LoudPanic("boom")
+	}()
 }

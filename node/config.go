@@ -14,6 +14,10 @@ const (
 	datadirNodeDatabase = "nodes" // Path within the datadir to store the node infos
 )
 
+var DefaultConfig = Config{
+	P2P: p2p.DefaultConfig,
+}
+
 type Config struct {
 	Name      string
 	UserIdent string
