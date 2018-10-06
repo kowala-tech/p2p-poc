@@ -18,8 +18,8 @@ import (
 type Node struct {
 	cfg Config
 
-	serverCfg p2p.Config
-	overlay   *p2p.Overlay
+	hostCfg p2p.Config
+	host    *p2p.Host
 
 	lock         sync.RWMutex
 	serviceFuncs []ServiceConstructor     // Service constructors (in dependency order)
@@ -29,7 +29,7 @@ type Node struct {
 
 	instanceDirLock flock.Releaser // prevents concurrent use of instance directory
 
-	log log.Logger
+	logger log.Logger
 
 	stop chan struct{} // Channel to wait for termination notifications
 }
@@ -44,7 +44,7 @@ func New(ctx context.Context, cfg Config) *Node {
 		cfg:          cfg,
 		serviceFuncs: []ServiceConstructor{},
 		globalEvents: new(event.TypeMux),
-		log:          cfg.Logger,
+		logger:       cfg.Logger,
 	}
 }
 
@@ -54,7 +54,7 @@ func (n *Node) Register(constructor ServiceConstructor) error {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 
-	if n.overlay != nil {
+	if n.host != nil {
 		return ErrNodeRunning
 	}
 	n.serviceFuncs = append(n.serviceFuncs, constructor)
@@ -67,7 +67,7 @@ func (n *Node) Start() error {
 	defer n.lock.Unlock()
 
 	// Short circuit if the node's already running
-	if n.overlay != nil {
+	if n.host != nil {
 		return ErrNodeRunning
 	}
 	if err := n.openDataDir(); err != nil {
@@ -76,20 +76,20 @@ func (n *Node) Start() error {
 
 	// Initialize the p2p server. This creates the node key and
 	// discovery databases.
-	n.serverCfg = n.cfg.P2P
-	//n.serverCfg.PrivateKey = n.config.NodeKey()
-	n.serverCfg.Name = n.cfg.NodeName()
-	n.serverCfg.Log = n.log
+	n.hostCfg = n.cfg.P2P
+	//n.hostCfg.PrivateKey = n.config.NodeKey()
+	n.hostCfg.Name = n.cfg.NodeName()
+	n.hostCfg.Logger = n.logger
 
-	if n.serverCfg.NodeDatabaseDir == "" {
-		n.serverCfg.NodeDatabaseDir = n.cfg.NodeDB()
+	if n.hostCfg.NodeDatabaseDir == "" {
+		n.hostCfg.NodeDatabaseDir = n.cfg.NodeDB()
 	}
-	overlay, err := p2p.NewOverlay(n.serverCfg)
+	host, err := p2p.NewHost(n.hostCfg)
 	if err != nil {
 		return err
 	}
 
-	n.log.Info("Starting peer-to-peer node", "instance", n.serverCfg.Name)
+	n.logger.Info("Starting peer-to-peer node", "instance", n.hostCfg.Name)
 
 	// Otherwise copy and specialize the P2P configuration
 	services := make(map[reflect.Type]Service)
@@ -124,7 +124,7 @@ func (n *Node) Start() error {
 	started := []reflect.Type{}
 	for kind, service := range services {
 		// Start the next service, stopping all previous upon failure
-		if err := service.Start(overlay); err != nil {
+		if err := service.Start(host); err != nil {
 			for _, kind := range started {
 				services[kind].Stop()
 			}
@@ -140,7 +140,7 @@ func (n *Node) Start() error {
 
 	// Finish initializing the startup
 	n.services = services
-	n.overlay = overlay
+	n.host = host
 
 	return nil
 }
@@ -171,7 +171,7 @@ func (n *Node) Stop() error {
 	defer n.lock.Unlock()
 
 	// Short circuit if the node's not running
-	if n.overlay == nil {
+	if n.host == nil {
 		return ErrNodeStopped
 	}
 
@@ -190,12 +190,12 @@ func (n *Node) Stop() error {
 	}
 	//n.server.Stop()
 	n.services = nil
-	n.overlay = nil
+	n.host = nil
 
 	// Release instance directory lock.
 	if n.instanceDirLock != nil {
 		if err := n.instanceDirLock.Release(); err != nil {
-			n.log.Error("Can't release datadir lock", "err", err)
+			n.logger.Error("Can't release datadir lock", "err", err)
 		}
 		n.instanceDirLock = nil
 	}
@@ -231,7 +231,7 @@ func convertFileLockError(err error) error {
 // at the time of invocation, the method immediately returns.
 func (n *Node) Wait() {
 	n.lock.RLock()
-	if n.overlay == nil {
+	if n.host == nil {
 		n.lock.RUnlock()
 		return
 	}

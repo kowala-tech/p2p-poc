@@ -3,7 +3,6 @@ package p2p
 import (
 	"github.com/kowala-tech/kcoin/client/log"
 	crypto "github.com/libp2p/go-libp2p-crypto"
-	addr "github.com/multiformats/go-multiaddr"
 )
 
 var DefaultConfig = Config{
@@ -21,11 +20,13 @@ type Config struct {
 	// Use common.MakeName to create a name that follows existing conventions.
 	Name string
 
-	BootstrapNodes []*addr.Multiaddr
+	BootstrapNodes []string
 
 	ListenAddr string
 
 	NodeDatabaseDir string
 
-	Log log.Logger
+	Logger log.Logger
+
+	IsBootnode bool
 }

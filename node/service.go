@@ -33,6 +33,6 @@ type ServiceConstructor func(ctx *ServiceContext) (Service, error)
 
 // Service is an individual protocol that can be registered into a node.
 type Service interface {
-	Start(server *p2p.Overlay) error
+	Start(server *p2p.Host) error
 	Stop() error
 }

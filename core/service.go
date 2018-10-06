@@ -16,9 +16,8 @@ type Service struct {
 	topicSub *pubsub.Subscription
 
 	globalEvents *event.TypeMux
-	overlay      *pubsub.PubSub
 
-	log log.Logger
+	logger log.Logger
 
 	doneCh chan struct{}
 }
@@ -31,20 +30,21 @@ func New(ctx *node.ServiceContext, cfg Config) (*Service, error) {
 	service := &Service{
 		topic:        protocolName,
 		globalEvents: ctx.GlobalEvents,
-		log:          cfg.Logger,
+		logger:       cfg.Logger,
 		doneCh:       make(chan struct{}),
 	}
 
 	return service, nil
 }
 
-func (s *Service) Start(overlay *p2p.Overlay) error {
-	sub, err := overlay.Subscribe(s.topic)
+func (s *Service) Start(host *p2p.Host) error {
+	sub, err := host.Subscribe(s.topic)
 	if err != nil {
 		return err
 	}
 
 	go handleSubscription(sub)
+
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -52,18 +52,14 @@ func (s *Service) Start(overlay *p2p.Overlay) error {
 		for {
 			select {
 			case <-ticker.C:
-				overlay.Publish(s.topic, []byte("teste"))
+				s.logger.Info("Sending Message")
+				host.Publish(s.topic, []byte("teste"))
 			case <-s.doneCh:
 				return
 			}
 		}
 	}()
 
-	return nil
-}
-
-func (s *Service) Stop() error {
-	s.topicSub.Cancel()
 	return nil
 }
 
@@ -74,4 +70,9 @@ func handleSubscription(sub *pubsub.Subscription) {
 			return
 		}
 	}
+}
+
+func (s *Service) Stop() error {
+	s.topicSub.Cancel()
+	return nil
 }
