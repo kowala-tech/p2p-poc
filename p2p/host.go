@@ -22,7 +22,7 @@ import (
 
 type Host struct {
 	*pubsub.PubSub
-	host host.Host
+	host.Host
 
 	logger log.Logger
 }
@@ -72,7 +72,7 @@ func NewHost(cfg Config) (*Host, error) {
 	}
 
 	return &Host{
-		host:   host,
+		Host:   host,
 		PubSub: gossip,
 		logger: cfg.Logger,
 	}, nil
