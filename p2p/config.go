@@ -2,22 +2,19 @@ package p2p
 
 import (
 	"github.com/kowala-tech/kcoin/client/log"
+	"github.com/kowala-tech/p2p-poc/params"
 	crypto "github.com/libp2p/go-libp2p-crypto"
 )
 
 var DefaultConfig = Config{
-	MaxPeers: 15,
+	ListenAddr:     "/ip4/127.0.0.1/tcp/10000",
+	IsBootnode:     false,
+	BootstrapNodes: params.NetworkBootnodes,
 }
 
 type Config struct {
 	Identity *crypto.PrivKey
 
-	// MaxPeers is the maximum number of peers that can be
-	// connected. It must be greater than zero.
-	MaxPeers int
-
-	// Name sets the node name of this host.
-	// Use common.MakeName to create a name that follows existing conventions.
 	Name string
 
 	BootstrapNodes []string
@@ -29,4 +26,6 @@ type Config struct {
 	Logger log.Logger
 
 	IsBootnode bool
+
+	IDGenerationSeed int
 }

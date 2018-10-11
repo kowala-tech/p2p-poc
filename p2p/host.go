@@ -29,17 +29,22 @@ type Host struct {
 
 func NewHost(cfg Config) (*Host, error) {
 	if cfg.Logger == nil {
-		cfg.Logger = log.New()
+		cfg.Logger = log.New("package", "p2p/host")
 	}
 
 	ctx := context.Background()
 
-	privKey, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, rand.New(rand.NewSource(0)))
+	privKey, _, err := crypto.GenerateKeyPairWithReader(crypto.RSA, 2048, rand.New(rand.NewSource(int64(cfg.IDGenerationSeed))))
 	if err != nil {
 		return nil, err
 	}
 
 	host, err := libp2p.New(ctx, libp2p.Identity(privKey), libp2p.ListenAddrStrings(cfg.ListenAddr))
+	if err != nil {
+		return nil, err
+	}
+
+	gossip, err := pubsub.NewGossipSub(ctx, host)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +62,9 @@ func NewHost(cfg Config) (*Host, error) {
 			bootnodes[i] = *p
 		}
 		routedHost := rhost.Wrap(host, dht)
-		bootstrapConnect(ctx, routedHost, bootnodes, cfg.Logger)
+		if err := bootstrapConnect(ctx, routedHost, bootnodes, cfg.Logger); err != nil {
+			log.Error("Could not connect to the bootstrap nodes", "err", err)
+		}
 	}
 
 	if cfg.IsBootnode {
@@ -66,10 +73,7 @@ func NewHost(cfg Config) (*Host, error) {
 		}
 	}
 
-	gossip, err := pubsub.NewGossipSub(ctx, host)
-	if err != nil {
-		return nil, err
-	}
+	cfg.Logger.Info("Listening", "ID", host.ID().Pretty(), "addr", cfg.ListenAddr)
 
 	return &Host{
 		Host:   host,
@@ -79,9 +83,11 @@ func NewHost(cfg Config) (*Host, error) {
 }
 
 func bootstrapConnect(ctx context.Context, ph host.Host, peers []pstore.PeerInfo, log log.Logger) error {
-	if len(peers) < 1 {
+	if len(peers) == 0 {
 		return errors.New("not enough bootstrap peers")
 	}
+
+	log.Info("Connecting to bootstrap nodes ...", "peers", peers)
 
 	errs := make(chan error, len(peers))
 	var wg sync.WaitGroup
@@ -95,17 +101,17 @@ func bootstrapConnect(ctx context.Context, ph host.Host, peers []pstore.PeerInfo
 		wg.Add(1)
 		go func(p pstore.PeerInfo) {
 			defer wg.Done()
-			defer log.Debug("bootstrapDial", ph.ID(), p.ID)
-			log.Debug("from", ph.ID(), "bootstrapping to", p.ID)
+			defer log.Debug("bootstrapDial", "from", ph.ID(), "bootstrapping to", p.ID)
+			log.Debug("bootstrapDial", "from", ph.ID(), "bootstrapping to", p.ID)
 
 			ph.Peerstore().AddAddrs(p.ID, p.Addrs, pstore.PermanentAddrTTL)
 			if err := ph.Connect(ctx, p); err != nil {
-				log.Error("Failed to bootstrap with", p.ID, err)
+				log.Error("Failed to bootstrap with", "ID", p.ID, "err", err)
 				errs <- err
 				return
 			}
-			log.Debug("bootstrapDialSuccess", p.ID)
-			log.Info("Bootstrapped with", p.ID)
+			log.Debug("bootstrapDialSuccess", "ID", p.ID)
+			log.Info("Bootstrapped with", "ID", p.ID)
 		}(p)
 	}
 	wg.Wait()

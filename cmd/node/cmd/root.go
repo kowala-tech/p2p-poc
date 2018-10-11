@@ -17,14 +17,15 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log"
+	stdliblog "log"
 	"os"
 	"os/signal"
 	"syscall"
 
-	kcoinlog "github.com/kowala-tech/kcoin/client/log"
+	"github.com/kowala-tech/kcoin/client/log"
 	"github.com/kowala-tech/p2p-poc/core"
 	"github.com/kowala-tech/p2p-poc/node"
+	"github.com/kowala-tech/p2p-poc/params"
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -33,20 +34,17 @@ import (
 var (
 	cfgFile    string
 	verbosity  int
-	vmodule    string
 	listenAddr string
+	isBootnode bool
+	seed       int
+	bootnodes  = make([]string, 0)
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "node",
-	Short: "Network node",
-	Long: `A longer description that spans multiple lines and likely contains
-examples and usage of using your application. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	RunE: run,
+	Short: "Network full node",
+	Long:  ``,
+	RunE:  run,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -62,9 +60,11 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.node.yaml)")
-	rootCmd.PersistentFlags().StringVar(&listenAddr, "addr", "/ip4/127.0.0.1/tcp/33445", "listen address")
-	rootCmd.PersistentFlags().IntVar(&verbosity, "verbosity", int(kcoinlog.LvlInfo), "log verbosity (0-9)")
-	rootCmd.PersistentFlags().StringVar(&vmodule, "vmodule", "", "log verbosity pattern")
+	rootCmd.PersistentFlags().StringVar(&listenAddr, "addr", "/ip4/127.0.0.1/tcp/10001", "listen address")
+	rootCmd.PersistentFlags().IntVar(&verbosity, "verbosity", int(log.LvlDebug), "log verbosity (0-9)")
+	rootCmd.PersistentFlags().BoolVar(&isBootnode, "boot", false, "bootnode")
+	rootCmd.PersistentFlags().IntVar(&seed, "seed", 0, "random seed for ID generation")
+	rootCmd.PersistentFlags().StringSliceVar(&bootnodes, "bootnodes", []string{}, "bootnodes")
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -94,6 +94,11 @@ func initConfig() {
 }
 
 func run(cmd *cobra.Command, args []string) error {
+	// filter log messages by level flag
+	glogger := log.NewGlogHandler(log.StreamHandler(os.Stderr, log.TerminalFormat(true)))
+	glogger.Verbosity(log.Lvl(verbosity))
+	log.Root().SetHandler(glogger)
+
 	node := makeFullNode()
 	startNode(node)
 	node.Wait()
@@ -111,7 +116,7 @@ func registerCoreService(stack *node.Node, cfg core.Config) {
 		fullNode, err := core.New(ctx, cfg)
 		return fullNode, err
 	}); err != nil {
-		log.Fatal("Failed to register the core service")
+		stdliblog.Fatal("Failed to register the core service")
 	}
 }
 
@@ -126,6 +131,8 @@ func makeConfigNode() (*node.Node, GlobalConfig) {
 		Core: core.DefaultConfig,
 	}
 
+	setNodeConfig(&cfg.Node)
+
 	node := node.New(context.Background(), cfg.Node)
 
 	return node, cfg
@@ -135,23 +142,35 @@ func makeConfigNode() (*node.Node, GlobalConfig) {
 // it unlocks any requested accounts, and starts the RPC/IPC interfaces and the
 // validator.
 func startNode(stack *node.Node) {
+	log.Info("Starting Node")
 	if err := stack.Start(); err != nil {
-		kcoinlog.Crit("Error starting protocol stack: %v", err)
+		log.Crit("Error starting protocol stack", "err", err)
 	}
 	go func() {
 		sigc := make(chan os.Signal, 1)
 		signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 		defer signal.Stop(sigc)
 		<-sigc
-		kcoinlog.Info("Got interrupt, shutting down...")
+		log.Info("Got interrupt, shutting down...")
 		go stack.Stop()
 		for i := 10; i > 0; i-- {
 			<-sigc
 			if i > 1 {
-				kcoinlog.Warn("Already shutting down, interrupt more to panic.", "times", i-1)
+				log.Warn("Already shutting down, interrupt more to panic.", "times", i-1)
 			}
 		}
 		//debug.Exit() // ensure trace and CPU profile data is flushed.
 		//debug.LoudPanic("boom")
 	}()
+}
+
+func setNodeConfig(cfg *node.Config) {
+	if isBootnode {
+		cfg.P2P.IsBootnode = true
+	}
+
+	cfg.P2P.ListenAddr = listenAddr
+	cfg.P2P.BootstrapNodes = params.NetworkBootnodes
+	cfg.P2P.IDGenerationSeed = seed
+	cfg.P2P.BootstrapNodes = bootnodes
 }

@@ -37,7 +37,7 @@ type Node struct {
 // New create a new Kowala node, ready for service registration.
 func New(ctx context.Context, cfg Config) *Node {
 	if cfg.Logger == nil {
-		cfg.Logger = log.New()
+		cfg.Logger = log.New("package", "node")
 	}
 
 	return &Node{
@@ -45,6 +45,7 @@ func New(ctx context.Context, cfg Config) *Node {
 		serviceFuncs: []ServiceConstructor{},
 		globalEvents: new(event.TypeMux),
 		logger:       cfg.Logger,
+		stop:         make(chan struct{}),
 	}
 }
 
@@ -89,7 +90,7 @@ func (n *Node) Start() error {
 		return err
 	}
 
-	n.logger.Info("Starting peer-to-peer node", "instance", n.hostCfg.Name)
+	n.logger.Info("Starting p2p node", "instance", n.hostCfg.Name)
 
 	// Otherwise copy and specialize the P2P configuration
 	services := make(map[reflect.Type]Service)
@@ -141,6 +142,8 @@ func (n *Node) Start() error {
 	// Finish initializing the startup
 	n.services = services
 	n.host = host
+
+	n.logger.Info("Node Started")
 
 	return nil
 }
@@ -217,6 +220,8 @@ func (n *Node) Stop() error {
 			return keystoreErr
 		}
 	*/
+	n.logger.Info("Node started")
+
 	return nil
 }
 

@@ -11,18 +11,16 @@ import (
 	"github.com/kowala-tech/p2p-poc/p2p"
 	pubsub "github.com/libp2p/go-floodsub"
 	"github.com/libp2p/go-libp2p-net"
-	inet "github.com/libp2p/go-libp2p-net"
 	maddr "github.com/multiformats/go-multiaddr"
 )
 
 type Service struct {
-	topic    string
-	topicSub *pubsub.Subscription
+	topic             string
+	topicSubscription *pubsub.Subscription
 
 	notifiee *net.NotifyBundle
 	peers    *peerSet
-
-	host p2p.Host
+	host     p2p.Host
 
 	globalEvents *event.TypeMux
 
@@ -35,7 +33,7 @@ type Service struct {
 
 func New(ctx *node.ServiceContext, cfg Config) (*Service, error) {
 	if cfg.Logger == nil {
-		cfg.Logger = log.New()
+		cfg.Logger = log.New("package", "core")
 	}
 
 	service := &Service{
@@ -54,55 +52,75 @@ func New(ctx *node.ServiceContext, cfg Config) (*Service, error) {
 }
 
 func (s *Service) Start(host *p2p.Host) error {
+	s.logger.Info("Starting Core Service")
+
 	host.Network().Notify(s.notifiee)
 
-	sub, err := host.Subscribe(s.topic)
+	subscription, err := host.Subscribe(s.topic)
 	if err != nil {
 		return err
 	}
+	s.topicSubscription = subscription
 
-	go handleSubscription(sub)
+	go handleSubscription(s.topicSubscription)
 
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
+		ticker2 := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ticker.C:
+				s.logger.Info("host", "len(peers)", len(host.Network().Peers()))
 				s.logger.Info("Sending Message")
-				host.Publish(s.topic, []byte("teste"))
+				if err := host.Publish(s.topic, []byte("teste")); err != nil {
+					s.logger.Error("Sending Message Failure")
+				}
+			case <-ticker2.C:
+				subscription.Cancel()
 			case <-s.doneCh:
 				return
 			}
 		}
 	}()
 
+	s.logger.Info("Core Service Started")
+
 	return nil
 }
 
 func handleSubscription(sub *pubsub.Subscription) {
 	for {
-		_, err := sub.Next(context.Background())
+		msg, err := sub.Next(context.Background())
 		if err != nil {
+			log.Error("Could not receive message", "err", err)
 			return
 		}
+		log.Info("Received message", "from", msg.GetFrom(), "topics", msg.GetTopicIDs)
+
 	}
 }
 
 func (s *Service) Stop() error {
+	s.logger.Info("Stopping Core Service")
 	//host.Network().StopNotify(s.notifiee)
-	s.topicSub.Cancel()
+	s.topicSubscription.Cancel()
+	s.logger.Info("Core Service Stopped")
 	return nil
 }
 
-func (s *Service) peerConnected(network inet.Network, addr maddr.Multiaddr) {
-	newPeer(s.host, addr)
-	s.wg.Add(1)
-	defer s.wg.Done()
+func (s *Service) peerConnected(network net.Network, addr maddr.Multiaddr) {
+	log.Info("Peer connected")
+	/*
+		newPeer(s.host, addr)
+		s.wg.Add(1)
+		defer s.wg.Done()
+	*/
 }
 
-func (s *Service) peerDisconnected(network inet.Network, addr maddr.Multiaddr) {
+func (s *Service) peerDisconnected(network net.Network, addr maddr.Multiaddr) {
+	log.Info("Peer disconnected")
 	// @TODO
 }
 
